@@ -125,6 +125,11 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      # Required: switch from the default 'docker' driver to 'docker-container'
+      # so that cache export (type=gha) and multi-platform builds are supported.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       # Build multi-platform image using Buildx (supports linux/amd64 & arm64)
       - name: Build and push image
         uses: docker/build-push-action@v5
@@ -133,7 +138,7 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha          # GitHub Actions cache for faster builds
+          cache-from: type=gha
           cache-to:   type=gha,mode=max
 
   # ── Job 3: Deploy (placeholder for your target: K8s / ECS / etc.) ──
