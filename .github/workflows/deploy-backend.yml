@@ -1,0 +1,183 @@
+# =============================================================
+# .github/workflows/deploy-backend.yml
+# Repository: insurance-api
+#
+# TRIGGER  : repository_dispatch from insurance-database
+#            event-type: database_deployed
+# DOES     : test → build Docker image → push to Docker Hub → deploy
+# ON SUCCESS: fires repository_dispatch → insurance-web repo
+#
+# Secrets needed in this repo's Settings → Secrets:
+#   DOCKERHUB_USERNAME   — Docker Hub username
+#   DOCKERHUB_TOKEN      — Docker Hub access token (not password)
+#   CROSS_REPO_TOKEN     — GitHub PAT with repo scope (to dispatch)
+# =============================================================
+
+name: Deploy Backend
+
+on:
+  repository_dispatch:
+    types: [database_deployed]    # listens ONLY for this specific event type
+
+  # Also allow manual trigger for testing / hotfixes
+  workflow_dispatch:
+
+jobs:
+  # ── Job 1: Unit tests ─────────────────────────────────────────
+  test:
+    name: Run Unit Tests
+    runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: rootpassword
+          MYSQL_DATABASE: insurance_db
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -prootpassword"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Log what triggered this workflow — visible in GitHub Actions UI
+      - name: Log trigger info
+        run: |
+          echo "╔══════════════════════════════════════╗"
+          echo "║  insurance-api deployment triggered  ║"
+          echo "╚══════════════════════════════════════╝"
+          echo "  Event type  : ${{ github.event_name }}"
+          echo "  DB SHA      : ${{ github.event.client_payload.db_sha }}"
+          echo "  DB actor    : ${{ github.event.client_payload.db_actor }}"
+          echo "  DB repo     : ${{ github.event.client_payload.db_repo }}"
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        env:
+          DB_HOST: 127.0.0.1
+          DB_PORT: "3306"
+          DB_NAME: insurance_db
+          DB_USER: root
+          DB_PASS: rootpassword
+        run: npm test
+
+  # ── Job 2: Build & push Docker image ─────────────────────────
+  build-push:
+    name: Build & Push Docker Image
+    runs-on: ubuntu-latest
+    needs: test                   # only build if tests pass
+
+    outputs:
+      image_tag: ${{ steps.meta.outputs.version }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Generate image tags — uses branch name + short SHA
+      # e.g. naveen/insurance-api:main-abc1234
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/insurance-api
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=,format=short
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Build multi-platform image using Buildx (supports linux/amd64 & arm64)
+      - name: Build and push image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha          # GitHub Actions cache for faster builds
+          cache-to:   type=gha,mode=max
+
+  # ── Job 3: Deploy (placeholder for your target: K8s / ECS / etc.) ──
+  deploy:
+    name: Deploy to Environment
+    runs-on: ubuntu-latest
+    needs: build-push
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ----- For GKE (matches your existing setup): ----------------
+      # - name: Authenticate to GCP
+      #   uses: google-github-actions/auth@v2
+      #   with:
+      #     credentials_json: ${{ secrets.GCP_SA_KEY }}
+      #
+      # - name: Set up kubectl
+      #   uses: google-github-actions/get-gke-credentials@v2
+      #   with:
+      #     cluster_name: insurance-cluster
+      #     location: asia-south1-a
+      #
+      # - name: Update image tag
+      #   run: |
+      #     kubectl set image deployment/insurance-api \
+      #       api=${{ secrets.DOCKERHUB_USERNAME }}/insurance-api:${{ needs.build-push.outputs.image_tag }} \
+      #       --namespace=insurance
+      #
+      # - name: Wait for rollout
+      #   run: kubectl rollout status deployment/insurance-api -n insurance --timeout=120s
+      # -------------------------------------------------------------
+
+      - name: Simulate deployment (replace with real deploy step above)
+        run: |
+          echo "  Deploying image: ${{ secrets.DOCKERHUB_USERNAME }}/insurance-api:${{ needs.build-push.outputs.image_tag }}"
+          echo "  [OK] Backend deployed successfully"
+
+  # ── Job 4: Trigger frontend deployment ───────────────────────
+  dispatch-frontend:
+    name: Trigger Frontend Deployment
+    runs-on: ubuntu-latest
+    needs: deploy
+
+    steps:
+      - name: Dispatch event to insurance-web
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.CROSS_REPO_TOKEN }}
+          repository: ${{ github.repository_owner }}/insurance-web
+          event-type: backend_deployed
+          client-payload: |
+            {
+              "api_sha":       "${{ github.sha }}",
+              "api_image_tag": "${{ needs.build-push.outputs.image_tag }}",
+              "db_sha":        "${{ github.event.client_payload.db_sha }}",
+              "db_actor":      "${{ github.event.client_payload.db_actor }}",
+              "api_run_id":    "${{ github.run_id }}",
+              "timestamp":     "${{ github.event.repository.updated_at }}"
+            }
+
+      - name: Log dispatch confirmation
+        run: |
+          echo "✅ backend_deployed event sent to insurance-web"
+          echo "   API image: ${{ needs.build-push.outputs.image_tag }}"
