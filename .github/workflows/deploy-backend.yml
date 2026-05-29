@@ -89,7 +89,7 @@ jobs:
         uses: actions/checkout@v4
 
       # Generate image tags — uses branch name + short SHA
-      # e.g. naveen/insurance-api:main-abc1234
+      # e.g. naveen/insurance-api:master-abc1234
       - name: Docker metadata
         id: meta
         uses: docker/metadata-action@v5
@@ -98,7 +98,7 @@ jobs:
           tags: |
             type=ref,event=branch
             type=sha,prefix=,format=short
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/master' }}
 
       - name: Login to Docker Hub
         uses: docker/login-action@v3
